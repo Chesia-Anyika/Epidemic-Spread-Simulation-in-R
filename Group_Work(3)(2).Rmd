@@ -1,0 +1,349 @@
+---
+title: "Group Task"
+author: "Nzambuli Daniel, Chesia Anyika, Brandon Gem, Waimiri Romeo"
+date: "2024-02-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading Libraries to Model SEIR-D with Children and Adults
+
+```{r}
+library(deSolve)
+library(tidyverse)
+library(DiagrammeR)
+```
+
+## States
+
+```{r}
+grViz("digraph flowchart {
+      graph [layout = dot,
+       rankdir = LR]
+      node [fontname = Helvetica, shape = rectangle,]
+      tab1 [label = '@@1']
+      tab2 [label = '@@2']
+      tab3 [label = '@@3'] 
+      tab4 [label = '@@4']
+      tab5 [label = '@@5']
+      tab6 [label = '@@6']
+      tab7 [label = '@@7']
+      tab8 [label = '@@8']
+      tab9 [label = '@@9']
+      # edge definitions with the node IDs
+      tab1 -> tab2 [label = 'beta child'];
+      tab1 -> tab3 [label = 'beta adult'];
+      tab2 -> tab4 [label = 'kappa child'];
+      tab4 -> tab6 [label = 'mu child'];
+      tab4 -> tab8 [label = 'gamma child'];
+      tab3 -> tab5 [label = 'kappa adult'];
+      tab5 -> tab7 [label = 'mu adult'];
+      tab5 -> tab9 [label = 'gamma adult'];
+      }
+
+      [1]: 'Susceptible'
+      [2]: 'Exposed Children'
+      [3]: 'Exposed Adults'
+      [4]: 'Infected Children'
+      [5]: 'Infected Adult'
+      [6]: 'Dead Children'
+      [7]: 'Dead Adults'
+      [8]: 'Recovered Children'
+      [9]: 'Recovered Adults'
+      ")
+```
+
+The SEIRD model extends the SEIR model by adding a compartment for individuals who have succumbed to the disease. The basic flow of individuals between compartments in the SEIRD model is as follows:
+
+1.  S (Susceptible): Individuals who are not infected but can become exposed to the virus.
+2.  E (Exposed): Individuals who have been exposed to the virus but are not yet infectious.
+3.  I (Infectious): Individuals who are currently infected and can spread the disease to others.
+4.  R (Recovered): Individuals who have recovered from the infection and are assumed to be immune.
+5.  D (Dead): Individuals who have died as a result of the disease.
+
+The transition probabilities from the states are
+
+1.  Beta -- The likelihood that an individual transitions from being susceptible to the disease
+2.  Kappa - '' being exposed to infected
+3.  Gamma - '' being infected to recovered
+4.  Mu - This is the rate of hospitalisation, split into mun(outpatient), and muh(ICU). Only people in the ICU die.
+5.  Alpha - death rate
+
+## The Differential Equations
+
+$$
+\frac{dS(t)}{dt} = \frac{-\beta S(t)I(t)}{N_{pop}}\\ \\
+\frac{dE(t)}{dt} = \frac{+\beta S(t)I(t)}{N_{pop}} - \kappa E(t)\\ \\
+\frac{dI(t)}{dt} = -\gamma I(t) + \kappa E(t)\\ \\
+\frac{dR(t)}{dt} = +\gamma(1-\mu_h) min(\alpha I(t), I_h) + \gamma(1 - \mu_n)max(0, \alpha I(t), I_h) + \gamma(1-\alpha) I\\ \\
+\frac{dD(t)}{dt} = +\gamma \mu_h min(\alpha I(t), I_h) + \gamma \mu_n max(0, \alpha I(t), I_h)\\ \\
+\frac{dN_{pop}}{dt} = \frac{dS(t)}{dt} + \frac{dE(t)}{dt} + \frac{dI(t)}{dt} + \frac{dR(t)}{dt} + \frac{dD(t)}{dt} = 0
+$$
+
+## Initial Set-up
+
+### Population Parameters
+
+```{r}
+population <- 10^6
+infectious_no <- 3
+N <- 1
+epsilon = infectious_no/population
+Ih <- 1 ### unlimited hospital capacity
+mun <- 0.95 ### 0 < mun < 1
+muh <- 1- mun
+alpha0 <- 0.6
+beta0 <- 1.2
+kappa0 <- 1.4 # sigma in normal models
+gamma0 <-0.3
+
+unit_time <- 70
+```
+
+An assumption is made that:
+
+> -   **`mun`**: The proportion of cases that are not hospitalized and die outside of hospitals.
+>
+> -   **`muh`**: The proportion of cases that are hospitalized and die within hospitals.
+>
+> finding the death rate is done by
+>
+> $$
+> \mu = (\mu_n * \alpha + \mu_h) * \epsilon
+> $$
+
+#### Disease Parameters
+
+```{r}
+# gamma beta and delta 
+gamma = gamma0
+beta = beta0
+delta = kappa0
+```
+
+### State Parameters
+
+> -   **Epsilon** the proportion of infectious individuals
+>
+> -   **S.child/ S.adult** the ratio of children and adults who are susceptible to the disease.
+>
+> $$
+> (1 - \epsilon)\ \rightarrow ratio\ of\ people\ who\ are\ not\ already\ infected\ by\ the\ disease 
+> $$
+
+```{r}
+
+S.child = 0.3 * (1 - epsilon)
+S.adult = 0.7 * (1 - epsilon)
+E.child = 0
+E.adult = 0
+I.child = 0
+I.adult = epsilon
+R.child = 0
+R.adult = 0
+D.child = 0
+D.adult = 0
+```
+
+### Transmission Probability
+
+> children have a contact rate of `13`
+>
+> -   **7** -- child to child contact rate
+>
+> -   **6** -- child to adult contact rate
+>
+> adult have a contact rate of `11`
+>
+> -   **10** -- adult to adult contact rate
+>
+> -   **1** -- child to child contact rate
+>
+> An assumption is made that all infected individuals are adults and because of that, the weight of the infected children is $\approx$ 0. This is why we do not consider c2c.beta, which is child to child transmission rate.
+
+```{r}
+Ro = 0.07 # transmission probability
+
+c2a.beta = 6 * Ro 
+
+# adult 
+a2a.beta = 10 * Ro
+a2c.beta = 1 * Ro 
+```
+
+We created a transmission probability `0.07`, which means for every contact of 100 individuals, 7 individuals can get infected.
+
+The infected individuals are all adults.
+
+The only contact children have with adults is the only time a child can get infected.
+
+c2a.beta is the number of children who can get infected.
+
+### Function to Perform SEIR-D
+
+```{r}
+seir_d <- function(time, state, parameters) {
+  S_child <- state[1]
+  E_child <- state[2]
+  I_child <- state[3]
+  R_child <- state[4]
+  D_child <- state[5]
+  S_adult <- state[6]
+  E_adult <- state[7]
+  I_adult <- state[8]
+  R_adult <- state[9]
+  D_adult <- state[10]
+  
+  with(as.list(parameters), {
+    # number of children and adults
+    N_c <- S_child + E_child + I_child + R_child + D_child
+    N_a <- S_adult + E_adult + I_adult + R_adult + D_adult
+    
+    # beta
+    beta_c <- c2a_beta
+    beta_a <- a2c_beta + a2a_beta
+    
+    # differential equations
+    dS_child <- -beta_c * S_child * I_adult / N_a
+    dE_child <- beta_c * S_child * I_adult / N_a - delta * E_child
+    dI_child <- delta * E_child - gamma * I_child - muh * I_child * alpha0
+    dR_child <- gamma * I_child
+    dD_child <- muh * alpha0 * I_child
+    
+    # adult
+    dS_adult <- -beta_a * (S_adult * I_adult) / N_a
+    dE_adult <- beta_a * (S_adult * I_adult) / N_a - delta * E_adult
+    dI_adult <- delta * E_adult - gamma * I_adult - muh * I_adult * alpha0
+    dR_adult <- gamma * I_adult
+    dD_adult <- muh * alpha0 * I_adult
+    
+    return(list(c(dS_child, dE_child, dI_child, dR_child, dD_child, dS_adult, dE_adult, dI_adult, dR_adult, dD_adult)))
+  })
+}
+```
+
+> the new differential equations are
+>
+> $$
+> \frac{dE}{dt} = \frac{\beta S I}{N} - \kappa E\\
+> \frac{dI}{dt} = \kappa E - (\gamma + \mu) * I\\
+> \frac{dR}{dt} = \gamma * I\\
+> \frac{dD}{dt} = \mu I
+> $$
+
+### Parameters and States
+
+```{r}
+step_h = 0.1
+state <- c(S.child = S.child, E.child = E.child, I.child = I.child, R.child = R.child, D.child = D.child, S.adult = S.adult, E.adult = E.adult, I.adult = I.adult, R.adult = R.adult, D.adult = D.adult)
+
+parameters <- c(beta = beta, kappa = kappa, gamma = gamma, delta = delta, muh = muh, alpha0 = alpha0, c2a_beta = c2a.beta, a2a_beta = a2a.beta, a2c_beta = a2c.beta)
+times = seq(0, unit_time, step_h)
+```
+
+> time is continuous from 0 up to the `unit time`
+
+## Generate the Output
+
+```{r}
+out_seir.d = as.data.frame(ode(y = state, times = times,
+                               func = seir_d, parms = parameters))
+```
+
+### Output in long format
+
+```{r}
+colnames(out_seir.d)
+```
+
+#### Relabel Columns
+
+```{r}
+library(tidyr)
+output_long <- out_seir.d %>%  pivot_longer(cols = c(S.child, E.child, I.child, R.child, D.child, S.adult, E.adult, I.adult, R.adult, D.adult),
+                        names_to = "state",
+                        values_to = "value") 
+
+```
+
+### Plot the data
+
+```{r}
+ggplot(data = output_long,                                               
+       aes(x = time, y = value, colour = state, group = state)) +  
+  geom_line() +                                                          
+  xlab("Time (days)")+                                                   
+  ylab("Number of people") +                                
+  labs(colour = "Compartment") 
+```
+
+### Split Plots
+
+```{r}
+child_data = out_seir.d[, c("time","S.child", "E.child", "I.child", "R.child", "D.child")]
+adult_data = out_seir.d[, c("time","S.adult", "E.adult", "I.adult", "R.adult", "D.adult")]
+```
+
+> -   There are three susceptible individuals, all of whom are adults. This means there is a delay to the time when children will be infected, as children have to first interact with adults before they can acquire the disease.
+>
+> -   It is noted that for every 13 people children interact with 6 will be adults. If the disease is to propagated by children acquiring the disease from adults (the child has to interact with the adult population to bring the disease back to the child population), there will be a $\frac{6}{13} \times \frac{I_a}{N_a}$ chance that any child will be infected.
+>
+> -   From this, it is expected that there will be a delay in the point at which children start being infected.
+
+### Plotting Split data
+
+```{r}
+child_long <- out_seir.d %>%  pivot_longer(cols = c(S.child, E.child, I.child, R.child, D.child),
+                        names_to = "state",
+                        values_to = "value") 
+adult_long <- out_seir.d %>%  pivot_longer(cols = c(S.adult, E.adult, I.adult, R.adult, D.adult),
+                        names_to = "state",
+                        values_to = "value") 
+```
+
+#### Child plot
+
+```{r}
+ggplot(data = child_long,                                               
+       aes(x = time, y = value, colour = state, group = state)) +  
+  geom_line() +                                                          
+  xlab("Time (days)")+                                                   
+  ylab("Number of people") +                                
+  labs(colour = "Compartment") 
+```
+
+#### Adult Long
+
+```{r}
+ggplot(data = adult_long,                                               
+       aes(x = time, y = value, colour = state, group = state)) +  
+  geom_line() +                                                          
+  xlab("Time (days)")+                                                   
+  ylab("Number of people") +                                
+  labs(colour = "Compartment") 
+```
+
+### Summary of the Model
+
+```{r}
+summary(out_seir.d)
+```
+
+> There are 10 adult to adult contacts, there are 6 child to adult contacts and 1 adult to child.
+>
+> The total number of adult children contacts is 7, if the interactions are considered to be mutually exclusive.
+>
+> This means that the adults that interact with the children can not be in the same place with the children who interact with the adults.
+>
+> From this it is clear that the total number of adult adult contacts are greater than the combined child adult contacts.
+>
+> This is reflected int he fact that adults seem to experience infection earlier on day (check) compared to when children experience infection.
+>
+> This leads to a later crossing of the susceptible and recovered individuals among children, as compared to that of adults.
+>
+> From the peaks of the infected children and adults, the disease seems to have had a larger impact on the children, because the proportion represented by the ratio `infected children : population of children` is higher than the one for `infected adult : population of adults`
+>
+> Following the contact rate of children to adults, which is 6, and the overall contact rate of adults, which is 11, the number of exposed children tends to always be lower than the number of exposed adults, as shown by the graph where exposed children is shallower than exposed adults.
